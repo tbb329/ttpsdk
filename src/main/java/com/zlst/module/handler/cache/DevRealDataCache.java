@@ -41,12 +41,12 @@ public class DevRealDataCache {
     private RedisUtils redisUtils;
 
     //定时处理批量缓存业务
-    @Scheduled(fixedRate = 5000)
+  /*  @Scheduled(fixedRate = 5000)
     public void batchCacheTask(){
         long start = System.currentTimeMillis();
         processRealDataCache();
         LOG.info("DevRealDataCache.batchCacheTask, 用时：{}毫秒", (System.currentTimeMillis() - start));
-    }
+    }*/
 
     private void processRealDataCache(){
         if (MapUtil.isNotEmpty(realDataCache)) {

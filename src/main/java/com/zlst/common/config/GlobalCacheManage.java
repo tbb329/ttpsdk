@@ -20,4 +20,17 @@ public class GlobalCacheManage {
     public static final long REALDATA_EFFTIME_MS = REALDATA_EFFTIME * 1000; //实时数据有效时间，单位：毫秒
 
     public static final String PRE_LOCK = PRE_ACTUATOR_CACHE + "lock:";
+
+    // 任务重连请求接口
+    public static final String DIS_PUBLISH_TASK = "/api/caas/dispatchSer/qyMemberBySerCode";
+
+    public static final String[] FILTER_GROUP_ELEMENTS = {"periodTime"};
+
+    public static final String POINT_INFO = "pointInfo";
+
+    public static final String GROUP_NAME = "groupName";
+
+    public static final String PERIOD_TIME = "periodTime";
+
+    public static final String GROUP_INFO = "groupInfo";
 }

@@ -1,9 +1,12 @@
 package com.zlst.module.task.service;
-
+import com.zlst.module.core.SdkInterface;
+import com.zlst.utils.SpringUtils;
 import cn.hutool.core.bean.BeanUtil;
 import cn.hutool.core.collection.IterUtil;
 import cn.hutool.core.util.StrUtil;
-
+import com.alibaba.fastjson.JSONArray;
+import com.alibaba.fastjson.JSONObject;
+import com.zlst.common.config.GlobalCacheManage;
 import com.zlst.module.task.bean.AgreementInfo;
 import com.zlst.module.task.bean.DispatchInfo;
 import com.zlst.module.task.bean.PointInfo;
@@ -11,10 +14,8 @@ import com.zlst.module.task.dto.CollectSourceDto;
 import com.zlst.module.task.dto.ConnectDto;
 import com.zlst.module.task.dto.DispatchDto;
 import com.zlst.module.task.dto.GroupDto;
-import com.zlst.module.task.utils.AgreementAnalyzeUtil;
 import com.zlst.param.ObjectToResult;
 import com.zlst.param.Result;
-import groovy.lang.GroovyObject;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -42,7 +43,7 @@ public class CollectQueryService {
     /**
      * 运行中采集任务
      */
-    private static final ConcurrentHashMap<String, List<ScheduledFuture>> collectThreadTask = new ConcurrentHashMap<>(8);
+    private static final ConcurrentHashMap<String, ScheduledFuture> collectThreadTask = new ConcurrentHashMap<>(8);
 
     /**
      * 运行中采集分组
@@ -53,6 +54,8 @@ public class CollectQueryService {
      * 停止中采集分组
      */
     public static final ConcurrentHashMap<String, DispatchInfo> suspendCollectGroup = new ConcurrentHashMap<>(8);
+
+    public static final ConcurrentHashMap<String, SdkInterface> statusMap = new ConcurrentHashMap<>();
 
     public void publishedQueryList(List<DispatchDto> dispatchDtoList){
         if(IterUtil.isEmpty(dispatchDtoList)){
@@ -73,42 +76,89 @@ public class CollectQueryService {
             return ObjectToResult.getResult(5, "输入采集源ID为空，请确认输入");
         }
         logger.info("调用发布采集源任务，当前采集源ID是:{}", collectSourceDto.getCollectSourceId());
-        if(checkFlag && IterUtil.isNotEmpty(collectThreadTask.get(collectSourceDto.getCollectSourceId()))){
+        if(checkFlag && !BeanUtil.isEmpty(collectThreadTask.get(collectSourceDto.getCollectSourceId()))){
             logger.error("CollectQueryService.publishedQuery, 已对该采集源生成采集任务,不能再次发布采集源");
             return ObjectToResult.getResult(ObjectToResult.SUCCESS_CODE, "CollectQueryService.publishedQuery, 已对该采集源生成采集任务,不能再次发布采集源");
         }
         AgreementInfo agreementInfo = new AgreementInfo(dispatchDto.getAgreementToExeDto(), collectSourceDto);
         ConnectDto connectToExeDto = dispatchDto.getConnectToExeDto();
-        List<GroupDto> groupDtoList = AgreementAnalyzeUtil.parseAgreement(agreementInfo);
+        List<GroupDto> groupDtoList = parseAgreement(agreementInfo);
         executingCollectGroup.put(collectSourceDto.getCollectSourceId(), new DispatchInfo(agreementInfo, connectToExeDto, groupDtoList));
+        //todo
+        String collectType = agreementInfo.getAgreementTypeName();
+        SdkInterface sdkInterface = SpringUtils.getBeanByName(collectType);
+        sdkInterface.setParam(connectToExeDto,agreementInfo,groupDtoList, collectSourceDto.getCollectSourceId());
 
-        GroovyObject ptcObj = null;
-//                CollectTaskActuator.createCollectTask(connectToExeDto, agreementInfo.getAgreementTypeName());
-        if (null != ptcObj) {
-            logger.info("连接创建成功!!!");
-//            logger.info("协议解析成功!!!");
-            List<ScheduledFuture> scheduledFutures = saveQuery(groupDtoList, ptcObj);
-            collectThreadTask.put(collectSourceDto.getCollectSourceId(), scheduledFutures);
-        }
-        return ObjectToResult.getResult(ObjectToResult.SUCCESS_CODE, "发布采集源任务成功，开始采集!");
+        ScheduledFuture scheduledFutures = scheduleThreadPool.schedule(sdkInterface, 0, TimeUnit.SECONDS);
+
+        collectThreadTask.put(collectSourceDto.getCollectSourceId(), scheduledFutures);
+
+        return ObjectToResult.getResult(executingCollectGroup);
     }
 
-    public List<ScheduledFuture> saveQuery(List<GroupDto> groupDtoList, GroovyObject ptcObj){
-        List<ScheduledFuture> scheduledFutures = groupDtoList.stream().map(groupDto -> {
-            long period = groupDto.getPeriodTime();
-            CollectTask collectTask = new CollectTask(groupDto, period, ptcObj);
-            ScheduledFuture scheduledFuture = scheduleThreadPool.scheduleAtFixedRate
-                                                    (collectTask,  1000, period, TimeUnit.MILLISECONDS);
-            return scheduledFuture;
+    public List<GroupDto> parseAgreement(AgreementInfo agreementInfo){
+        logger.info("开始执行解析协议信息!!!!");
+        Map<String, String> agreementParam = jsonObjectToHash(JSONObject.parseObject(agreementInfo.getAgreementContent()));
+        String groupInfo = agreementParam.get(GlobalCacheManage.GROUP_INFO);
+        agreementParam.remove(GlobalCacheManage.GROUP_INFO);
+        agreementInfo.setAgreementMap(agreementParam);
+        agreementInfo.setAgreementContent(groupInfo);
+        return parseToGroupDto(agreementInfo);
+    }
+
+    public List<GroupDto> parseToGroupDto(AgreementInfo agreementInfo){
+        logger.info("开始解析分组信息!!!!");
+        JSONArray groupArray = JSONArray.parseArray(agreementInfo.getAgreementContent());
+
+        List<GroupDto> groupDtoList = groupArray.stream().map( group -> {
+            JSONObject groupObject = (JSONObject) JSONObject.toJSON(group);
+            GroupDto groupDto = jsonObjectToGroup(groupObject, agreementInfo);
+            return groupDto;
         }).collect(toList());
-        logger.info("新建任务成功，开始进行采集!!!");
-        return scheduledFutures;
+
+        return groupDtoList;
     }
+
+    public GroupDto jsonObjectToGroup(JSONObject groupObject, AgreementInfo agreementInfo){
+        String groupName = groupObject.get(GlobalCacheManage.GROUP_NAME).toString();
+        String periodTime = groupObject.get(GlobalCacheManage.PERIOD_TIME).toString();
+        HashMap<String, String> params = this.jsonObjectToHash(groupObject, GlobalCacheManage.FILTER_GROUP_ELEMENTS);
+        List<PointInfo> pointInfoList = strToPoint(params.get(GlobalCacheManage.POINT_INFO));
+        params.remove(GlobalCacheManage.POINT_INFO);
+        logger.info("解析分组 :{} 信息结束", groupName);
+        return new GroupDto(groupName, periodTime, params, agreementInfo, pointInfoList);
+    }
+
+    public List<PointInfo> strToPoint(String pointStr){
+        JSONArray pointArray = JSONArray.parseArray(pointStr);
+        List<PointInfo> pointInfoList = pointArray.stream().map( point -> {
+            JSONObject pointObject = (JSONObject) JSONObject.toJSON(point);
+            HashMap<String, String> pointParam = this.jsonObjectToHash(pointObject);
+            PointInfo pointInfo = new PointInfo(pointParam);
+            return pointInfo;
+        }).collect(toList());
+        logger.info("解析测点信息结束!!!");
+        return pointInfoList;
+    }
+
+    public HashMap<String, String> jsonObjectToHash(JSONObject jsonObject, String... filter){
+        HashMap<String, String> params = new HashMap<>(8);
+        List<String> filterElements = Arrays.asList(filter);
+        for(Iterator<?> iterator = jsonObject.keySet().iterator(); iterator.hasNext();){
+            String key = iterator.next().toString();
+            if(!IterUtil.isEmpty(filterElements) && filterElements.contains(key)){
+                continue;
+            }
+            params.put(key, jsonObject.get(key).toString());
+        }
+        return params;
+    }
+
 
     public boolean delQuery(String collectSourceId){
         logger.info("采集源Id是 :{}", collectSourceId);
-        List<ScheduledFuture> scheduledFutures = collectThreadTask.get(collectSourceId);
-        if(IterUtil.isEmpty(scheduledFutures)){
+        ScheduledFuture scheduledFutures = collectThreadTask.get(collectSourceId);
+        if(BeanUtil.isEmpty(scheduledFutures)){
             if(BeanUtil.isEmpty(suspendCollectGroup.get(collectSourceId))){
                 logger.error("CollectQueryService.delQuery 未在执行中或暂停中的任务列表查询到相关任务，请确认任务是否存在");
                 return false;
@@ -116,7 +166,7 @@ public class CollectQueryService {
             suspendCollectGroup.remove(collectSourceId);
             return true;
         }
-        scheduledFutures.stream().forEach(scheduledFuture -> scheduledFuture.cancel(false));
+        scheduledFutures.cancel(false);
         collectThreadTask.remove(collectSourceId);
         executingCollectGroup.remove(collectSourceId);
         return true;
@@ -133,21 +183,15 @@ public class CollectQueryService {
         if(!delQuery(collectSourceId)){
             return ObjectToResult.getResult(7, "CollectQueryService.delQuery 未在执行中或暂停中的任务列表查询到相关任务，请确认任务是否存在");
         }
-        return ObjectToResult.getResult(ObjectToResult.SUCCESS_CODE, "停止任务成功!");
+        return ObjectToResult.getResult(JSONObject.toJSONString(suspendCollectGroup));
     }
 
     public Result restart(String collectSourceId){
         logger.info("采集源Id是 :{}", collectSourceId);
         DispatchInfo dispatchInfo = suspendCollectGroup.get(collectSourceId);
         suspendCollectGroup.remove(collectSourceId, dispatchInfo);
-        GroovyObject ptcObj = null;
-//                CollectTaskActuator.createCollectTask(dispatchInfo.getConnectDto(), dispatchInfo.getAgreementInfo().getAgreementTypeName());
-        if (null != ptcObj) {
-            List<ScheduledFuture> scheduledFutures = saveQuery(dispatchInfo.getGroupDtoList(), ptcObj);
-            collectThreadTask.put(collectSourceId, scheduledFutures);
-            executingCollectGroup.put(collectSourceId, dispatchInfo);
-        }
-        return ObjectToResult.getResult(ObjectToResult.SUCCESS_CODE, "重启任务成功!");
+
+        return ObjectToResult.getResult(JSONObject.toJSONString(executingCollectGroup));
     }
 
     public Map getExecutingMap(){
@@ -158,6 +202,16 @@ public class CollectQueryService {
     public Map getSuspendMap(){
         logger.info("开始获取停止中采集源任务列表!!!");
         return suspendCollectGroup;
+    }
+
+    public  void gettatus(String srcId){
+        SdkInterface sdkInterface = CollectQueryService.statusMap.get(srcId);
+        if(!BeanUtil.isEmpty(sdkInterface)){
+
+            sdkInterface.disconnect();
+
+
+        }
     }
 
     public static boolean taskIsActive(String cltId) {
