@@ -84,7 +84,7 @@ public class CollectQueryService {
         ConnectDto connectToExeDto = dispatchDto.getConnectToExeDto();
         List<GroupDto> groupDtoList = parseAgreement(agreementInfo);
         executingCollectGroup.put(collectSourceDto.getCollectSourceId(), new DispatchInfo(agreementInfo, connectToExeDto, groupDtoList));
-        //todo
+
         String collectType = agreementInfo.getAgreementTypeName();
         SdkInterface sdkInterface = SpringUtils.getBeanByName(collectType);
         sdkInterface.setParam(connectToExeDto,agreementInfo,groupDtoList, collectSourceDto.getCollectSourceId());
@@ -191,7 +191,20 @@ public class CollectQueryService {
         DispatchInfo dispatchInfo = suspendCollectGroup.get(collectSourceId);
         suspendCollectGroup.remove(collectSourceId, dispatchInfo);
 
-        return ObjectToResult.getResult(JSONObject.toJSONString(executingCollectGroup));
+        AgreementInfo agreementInfo = dispatchInfo.getAgreementInfo();
+        ConnectDto connectToExeDto = dispatchInfo.getConnectDto();
+        List<GroupDto> groupDtoList = parseAgreement(agreementInfo);
+        executingCollectGroup.put(connectToExeDto.getCollectSourceId(),dispatchInfo);
+
+        String collectType = agreementInfo.getAgreementTypeName();
+        SdkInterface sdkInterface = SpringUtils.getBeanByName(collectType);
+        sdkInterface.setParam(connectToExeDto,agreementInfo,groupDtoList, connectToExeDto.getCollectSourceId());
+
+        ScheduledFuture scheduledFutures = scheduleThreadPool.schedule(sdkInterface, 0, TimeUnit.SECONDS);
+
+        collectThreadTask.put(connectToExeDto.getCollectSourceId(), scheduledFutures);
+
+        return ObjectToResult.getResult(ObjectToResult.SUCCESS_CODE, "重启任务成功!");
     }
 
     public Map getExecutingMap(){
