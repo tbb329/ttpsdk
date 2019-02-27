@@ -84,16 +84,12 @@ public class OpcDA implements SdkInterface {
             );
             autos.connect();
             logger.info("采集源ID:{}开始连接OPC Server......",connectToExeDto.getCollectSourceId());
-            Thread.sleep(200);
 
         } catch (UnknownHostException e) {
             e.printStackTrace();
         } catch (JIException e) {
             e.printStackTrace();
-        } catch (InterruptedException e) {
-            e.printStackTrace();
         }
-        return;
     }
 
 
